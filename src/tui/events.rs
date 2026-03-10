@@ -1,9 +1,9 @@
 use chrono::{Local, NaiveTime, TimeZone, Timelike};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::task::{normalize_priority, parse_datetime_local};
+use crate::task::{normalize_priority, parse_datetime_local, status_column, status_from_column};
 
-use super::app::{AddField, App, Mode, TimeField};
+use super::app::{AddField, App, Focus, Mode, TimeField};
 use super::calendar::CalendarTarget;
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
@@ -13,36 +13,70 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::AddTask => handle_add(app, key),
         Mode::Calendar => handle_calendar(app, key),
         Mode::Time => handle_time(app, key),
+        Mode::Project => handle_project(app, key),
     }
 }
 
 fn handle_normal(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Down => app.next(),
-        KeyCode::Up => app.previous(),
+        KeyCode::Down => match app.focus {
+            Focus::Projects => app.next_project(),
+            Focus::Tasks => app.next(),
+        },
+        KeyCode::Up => match app.focus {
+            Focus::Projects => app.previous_project(),
+            Focus::Tasks => app.previous(),
+        },
+        KeyCode::Left => {
+            if app.focus == Focus::Tasks {
+                app.move_column(-1);
+            }
+        }
+        KeyCode::Right => {
+            if app.focus == Focus::Tasks {
+                app.move_column(1);
+            }
+        }
+        KeyCode::Tab => app.toggle_focus(),
+        KeyCode::Enter => {
+            if app.focus == Focus::Projects {
+                let _ = app.refresh_tasks();
+                app.board.row = 0;
+            }
+        }
         KeyCode::Char('a') => {
-            app.reset_add_form();
-            app.edit_id = None;
-            app.mode = Mode::AddTask;
-            app.set_status("");
+            if app.focus == Focus::Projects {
+                start_project_add(app);
+            } else {
+                app.reset_add_form();
+                app.edit_id = None;
+                app.mode = Mode::AddTask;
+                app.set_status("");
+            }
         }
         KeyCode::Char('e') => {
+            if app.focus == Focus::Projects {
+                start_project_edit(app);
+                return;
+            }
             let snapshot = app.selected_task().map(|task| {
                 (
                     task.id,
                     task.title.clone(),
+                    task.project_id,
                     task.priority,
                     task.deadline,
                     task.reminder,
                 )
             });
-            if let Some((id, title, priority, deadline, reminder)) = snapshot {
+            if let Some((id, title, project_id, priority, deadline, reminder)) = snapshot {
                 app.edit_id = Some(id);
                 app.add_form.title = title;
                 app.add_form.deadline = format_datetime_input(deadline);
                 app.add_form.reminder = format_datetime_input(reminder);
                 app.add_form.priority = priority;
+                app.add_form.project_index = app.project_index_by_id(project_id);
                 app.add_form.cursor_title = app.add_form.title.chars().count();
                 app.add_form.cursor_deadline = app.add_form.deadline.chars().count();
                 app.add_form.cursor_reminder = app.add_form.reminder.chars().count();
@@ -52,23 +86,38 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('d') => {
-            if let Some(task) = app.selected_task() {
+            if app.focus == Focus::Projects {
+                delete_selected_project(app);
+            } else if let Some(task) = app.selected_task() {
                 if app.db.delete_task(task.id).is_ok() {
                     let _ = app.refresh_tasks();
                 }
             }
         }
         KeyCode::Char('x') => {
-            if let Some(task) = app.selected_task() {
-                if app.db.mark_done(task.id).is_ok() {
-                    let _ = app.refresh_tasks();
+            if app.focus == Focus::Tasks {
+                if let Some(task) = app.selected_task() {
+                    if app.db.mark_done(task.id).is_ok() {
+                        let _ = app.refresh_tasks();
+                    }
                 }
+            }
+        }
+        KeyCode::Char('h') => {
+            if app.focus == Focus::Tasks {
+                move_selected_task(app, -1);
+            }
+        }
+        KeyCode::Char('l') => {
+            if app.focus == Focus::Tasks {
+                move_selected_task(app, 1);
             }
         }
         KeyCode::Char('/') => {
             app.mode = Mode::Search;
             app.search_query.clear();
-            app.selected = 0;
+            app.board.row = 0;
+            app.focus = Focus::Tasks;
         }
         _ => {}
     }
@@ -79,18 +128,18 @@ fn handle_search(app: &mut App, key: KeyEvent) {
         KeyCode::Esc | KeyCode::Enter => {
             app.mode = Mode::Normal;
             app.search_query.clear();
-            app.selected = 0;
+            app.board.row = 0;
         }
         KeyCode::Backspace => {
             app.search_query.pop();
-            app.selected = 0;
+            app.board.row = 0;
         }
         KeyCode::Char(c) => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 return;
             }
             app.search_query.push(c);
-            app.selected = 0;
+            app.board.row = 0;
         }
         KeyCode::Down => app.next(),
         KeyCode::Up => app.previous(),
@@ -117,6 +166,7 @@ fn handle_add(app: &mut App, key: KeyEvent) {
                 app.set_status("Title is required");
                 return;
             }
+            let project_id = app.project_id_by_index(app.add_form.project_index);
             let deadline = if app.add_form.deadline.trim().is_empty() {
                 None
             } else {
@@ -143,7 +193,14 @@ fn handle_add(app: &mut App, key: KeyEvent) {
             if let Some(id) = app.edit_id {
                 if let Err(err) =
                     app.db
-                        .update_task(id, app.add_form.title.trim(), priority, deadline, reminder)
+                        .update_task(
+                            id,
+                            app.add_form.title.trim(),
+                            project_id,
+                            priority,
+                            deadline,
+                            reminder,
+                        )
                 {
                     app.set_status(err.to_string());
                     return;
@@ -153,6 +210,7 @@ fn handle_add(app: &mut App, key: KeyEvent) {
                 if let Err(err) = app.db.add_task(
                     app.add_form.title.trim(),
                     None,
+                    project_id,
                     priority,
                     deadline,
                     reminder,
@@ -185,14 +243,18 @@ fn handle_add(app: &mut App, key: KeyEvent) {
             clamp_cursor(app);
         }
         KeyCode::Left => {
-            if app.add_form.field == AddField::Priority {
+            if app.add_form.field == AddField::Project {
+                cycle_project(app, -1);
+            } else if app.add_form.field == AddField::Priority {
                 app.add_form.priority = normalize_priority(app.add_form.priority - 1);
             } else {
                 move_cursor(app, -1);
             }
         }
         KeyCode::Right => {
-            if app.add_form.field == AddField::Priority {
+            if app.add_form.field == AddField::Project {
+                cycle_project(app, 1);
+            } else if app.add_form.field == AddField::Priority {
                 app.add_form.priority = normalize_priority(app.add_form.priority + 1);
             } else {
                 move_cursor(app, 1);
@@ -220,6 +282,61 @@ fn handle_add(app: &mut App, key: KeyEvent) {
                 insert_char(field, *cursor, ch);
                 *cursor += 1;
             }
+        }
+        _ => {}
+    }
+}
+
+fn handle_project(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+            app.project_form = super::app::ProjectForm::default();
+        }
+        KeyCode::Enter => {
+            let name = app.project_form.name.trim();
+            if name.is_empty() {
+                app.set_status("Project name is required");
+                return;
+            }
+            let result = if let Some(id) = app.project_form.edit_id {
+                match app.db.rename_project(id, name) {
+                    Ok(0) => {
+                        app.set_status("No project with that id");
+                        return;
+                    }
+                    Ok(_) => Ok(id),
+                    Err(err) => Err(err),
+                }
+            } else {
+                app.db.create_project(name)
+            };
+            match result {
+                Ok(id) => {
+                    let _ = app.refresh_projects();
+                    app.select_project_by_id(id);
+                    let _ = app.refresh_tasks();
+                    app.mode = Mode::Normal;
+                    app.project_form = super::app::ProjectForm::default();
+                    app.set_status("Project saved");
+                }
+                Err(err) => {
+                    app.set_status(err.to_string());
+                }
+            }
+        }
+        KeyCode::Left => move_project_cursor(app, -1),
+        KeyCode::Right => move_project_cursor(app, 1),
+        KeyCode::Backspace => {
+            if app.project_form.cursor > 0 {
+                delete_project_char(app);
+            }
+        }
+        KeyCode::Char(ch) => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                return;
+            }
+            insert_project_char(app, ch);
         }
         _ => {}
     }
@@ -292,6 +409,7 @@ fn handle_time(app: &mut App, key: KeyEvent) {
 fn current_field_and_cursor_mut(app: &mut App) -> Option<(&mut String, &mut usize)> {
     match app.add_form.field {
         AddField::Title => Some((&mut app.add_form.title, &mut app.add_form.cursor_title)),
+        AddField::Project => None,
         AddField::Deadline => Some((
             &mut app.add_form.deadline,
             &mut app.add_form.cursor_deadline,
@@ -306,7 +424,8 @@ fn current_field_and_cursor_mut(app: &mut App) -> Option<(&mut String, &mut usiz
 
 fn next_field(field: AddField) -> AddField {
     match field {
-        AddField::Title => AddField::Deadline,
+        AddField::Title => AddField::Project,
+        AddField::Project => AddField::Deadline,
         AddField::Deadline => AddField::Reminder,
         AddField::Reminder => AddField::Priority,
         AddField::Priority => AddField::Title,
@@ -316,7 +435,8 @@ fn next_field(field: AddField) -> AddField {
 fn prev_field(field: AddField) -> AddField {
     match field {
         AddField::Title => AddField::Priority,
-        AddField::Deadline => AddField::Title,
+        AddField::Project => AddField::Title,
+        AddField::Deadline => AddField::Project,
         AddField::Reminder => AddField::Deadline,
         AddField::Priority => AddField::Reminder,
     }
@@ -325,12 +445,14 @@ fn prev_field(field: AddField) -> AddField {
 fn clamp_cursor(app: &mut App) {
     let len = match app.add_form.field {
         AddField::Title => app.add_form.title.chars().count(),
+        AddField::Project => return,
         AddField::Deadline => app.add_form.deadline.chars().count(),
         AddField::Reminder => app.add_form.reminder.chars().count(),
         AddField::Priority => return,
     };
     match app.add_form.field {
         AddField::Title => app.add_form.cursor_title = app.add_form.cursor_title.min(len),
+        AddField::Project => {}
         AddField::Deadline => app.add_form.cursor_deadline = app.add_form.cursor_deadline.min(len),
         AddField::Reminder => app.add_form.cursor_reminder = app.add_form.cursor_reminder.min(len),
         AddField::Priority => {}
@@ -343,6 +465,7 @@ fn move_cursor(app: &mut App, delta: i32) {
             app.add_form.title.chars().count(),
             &mut app.add_form.cursor_title,
         ),
+        AddField::Project => return,
         AddField::Deadline => (
             app.add_form.deadline.chars().count(),
             &mut app.add_form.cursor_deadline,
@@ -361,6 +484,21 @@ fn move_cursor(app: &mut App, delta: i32) {
         next = len as i32;
     }
     *cursor = next as usize;
+}
+
+fn cycle_project(app: &mut App, delta: i32) {
+    if app.projects.is_empty() {
+        app.add_form.project_index = 0;
+        return;
+    }
+    let mut next = app.add_form.project_index as i32 + delta;
+    if next < 0 {
+        next = 0;
+    }
+    if next as usize >= app.projects.len() {
+        next = app.projects.len().saturating_sub(1) as i32;
+    }
+    app.add_form.project_index = next as usize;
 }
 
 fn insert_char(value: &mut String, cursor: usize, ch: char) {
@@ -410,6 +548,109 @@ fn increment_time(app: &mut App, delta: i32) {
                 minute += 60;
             }
             app.time_picker.minute = (minute % 60) as u32;
+        }
+    }
+}
+
+fn start_project_add(app: &mut App) {
+    app.project_form = super::app::ProjectForm::default();
+    app.mode = Mode::Project;
+    app.focus = Focus::Projects;
+    app.set_status("");
+}
+
+fn start_project_edit(app: &mut App) {
+    if let Some(entry) = app.projects.get(app.selected_project) {
+        if entry.name == "All" {
+            app.set_status("Cannot edit All project");
+            return;
+        }
+    } else {
+        app.set_status("Cannot edit All projects");
+        return;
+    }
+    if let Some(entry) = app.projects.get(app.selected_project) {
+        if let Some(id) = entry.id {
+            app.project_form.name = entry.name.clone();
+            app.project_form.cursor = app.project_form.name.chars().count();
+            app.project_form.edit_id = Some(id);
+            app.mode = Mode::Project;
+            app.focus = Focus::Projects;
+            app.set_status("");
+        }
+    }
+}
+
+fn delete_selected_project(app: &mut App) {
+    if let Some(entry) = app.projects.get(app.selected_project) {
+        if entry.name == "All" {
+            app.set_status("Cannot delete All project");
+            return;
+        }
+    } else {
+        app.set_status("Cannot delete All projects");
+        return;
+    }
+    if let Some(entry) = app.projects.get(app.selected_project) {
+        if let Some(id) = entry.id {
+            if app.db.delete_project(id).is_ok() {
+                let _ = app.refresh_projects();
+                let _ = app.refresh_tasks();
+                app.set_status("Project deleted");
+            }
+        }
+    }
+}
+
+fn move_project_cursor(app: &mut App, delta: i32) {
+    let len = app.project_form.name.chars().count();
+    let mut next = app.project_form.cursor as i32 + delta;
+    if next < 0 {
+        next = 0;
+    }
+    if next as usize > len {
+        next = len as i32;
+    }
+    app.project_form.cursor = next as usize;
+}
+
+fn insert_project_char(app: &mut App, ch: char) {
+    let idx = char_to_byte_index(&app.project_form.name, app.project_form.cursor);
+    app.project_form.name.insert(idx, ch);
+    app.project_form.cursor += 1;
+}
+
+fn delete_project_char(app: &mut App) {
+    let idx = char_to_byte_index(&app.project_form.name, app.project_form.cursor - 1);
+    if idx < app.project_form.name.len() {
+        app.project_form.name.remove(idx);
+        app.project_form.cursor -= 1;
+    }
+}
+
+fn move_selected_task(app: &mut App, delta: i32) {
+    let snapshot = app.selected_task().map(|task| (task.id, task.status));
+    if let Some((id, status)) = snapshot {
+        let mut next_col = status_column(status) as i32 + delta;
+        if next_col < 0 {
+            next_col = 0;
+        }
+        if next_col > 2 {
+            next_col = 2;
+        }
+        let next_status = status_from_column(next_col as usize);
+        if app.db.set_task_status(id, next_status).is_ok() {
+            let _ = app.refresh_tasks();
+            app.board.column = next_col as usize;
+            let cols = app.board_indices();
+            if let Some(pos) = cols[app.board.column]
+                .iter()
+                .position(|idx| app.tasks.get(*idx).map(|task| task.id) == Some(id))
+            {
+                app.board.row = pos;
+            } else {
+                app.board.row = 0;
+            }
         }
     }
 }

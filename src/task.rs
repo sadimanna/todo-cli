@@ -1,14 +1,22 @@
 use chrono::{Local, NaiveDateTime, TimeZone};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Todo,
+    InProgress,
+    Done,
+}
+
 #[derive(Debug, Clone)]
 pub struct Task {
     pub id: i64,
     pub title: String,
     pub description: Option<String>,
+    pub project_id: Option<i64>,
+    pub status: Status,
     pub priority: i64,
     pub deadline: Option<i64>,
     pub reminder: Option<i64>,
-    pub completed: bool,
 }
 
 pub fn parse_datetime_local(input: &str) -> Result<i64, String> {
@@ -32,11 +40,43 @@ pub fn format_datetime(ts: Option<i64>) -> String {
     }
 }
 
-pub fn status_label(completed: bool) -> &'static str {
-    if completed {
-        "Done"
-    } else {
-        "Pending"
+pub fn status_label(status: Status) -> &'static str {
+    match status {
+        Status::Todo => "Todo",
+        Status::InProgress => "In Progress",
+        Status::Done => "Done",
+    }
+}
+
+pub fn status_from_db(value: Option<String>) -> Status {
+    match value.as_deref() {
+        Some("IN_PROGRESS") => Status::InProgress,
+        Some("DONE") => Status::Done,
+        _ => Status::Todo,
+    }
+}
+
+pub fn status_to_db(status: Status) -> &'static str {
+    match status {
+        Status::Todo => "TODO",
+        Status::InProgress => "IN_PROGRESS",
+        Status::Done => "DONE",
+    }
+}
+
+pub fn status_column(status: Status) -> usize {
+    match status {
+        Status::Todo => 0,
+        Status::InProgress => 1,
+        Status::Done => 2,
+    }
+}
+
+pub fn status_from_column(column: usize) -> Status {
+    match column {
+        1 => Status::InProgress,
+        2 => Status::Done,
+        _ => Status::Todo,
     }
 }
 
