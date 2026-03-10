@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     priority INTEGER DEFAULT 1,
     deadline DATETIME,
     reminder DATETIME,
+    recurrence TEXT,
     completed BOOLEAN DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(project_id) REFERENCES projects(id)

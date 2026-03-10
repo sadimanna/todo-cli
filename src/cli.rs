@@ -1,7 +1,8 @@
-use crate::db::Db;
+use crate::db::{Db, NewTask};
 use crate::task::{
     format_datetime, normalize_priority, parse_datetime_local, priority_label, status_label,
 };
+use chrono::{Duration, Local, NaiveDate, TimeZone};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -16,7 +17,7 @@ pub enum Commands {
     /// Add a task
     Add {
         title: String,
-        #[arg(short, long)]
+        #[arg(short, long, alias = "desc")]
         description: Option<String>,
         #[arg(long)]
         project: Option<String>,
@@ -26,6 +27,8 @@ pub enum Commands {
         deadline: Option<String>,
         #[arg(long, value_name = "DATETIME")]
         remind: Option<String>,
+        #[arg(long, value_name = "FREQ")]
+        repeat: Option<String>,
     },
     /// List tasks
     List,
@@ -40,6 +43,10 @@ pub enum Commands {
     },
     /// Launch interactive UI
     Ui,
+    /// Show tasks due today and upcoming (next 3 days)
+    Today,
+    /// Show agenda for the coming week (next 7 days)
+    Week,
     /// Manage projects
     Project {
         #[command(subcommand)]
@@ -74,6 +81,7 @@ pub fn run_cli(cli: Cli) -> Result<(), String> {
             deadline,
             remind,
             priority,
+            repeat,
         } => {
             let db = Db::new().map_err(|e| e.to_string())?;
             let project_id = match project {
@@ -86,15 +94,17 @@ pub fn run_cli(cli: Cli) -> Result<(), String> {
             let deadline_ts = parse_optional_datetime(deadline)?;
             let reminder_ts = parse_optional_datetime(remind)?;
             let priority_value = parse_priority(&priority)?;
+            let recurrence = parse_recurrence(repeat.as_deref())?;
             let id = db
-                .add_task(
-                    &title,
-                    description.as_deref(),
+                .add_task(NewTask {
+                    title: &title,
+                    description: description.as_deref(),
                     project_id,
-                    priority_value,
-                    deadline_ts,
-                    reminder_ts,
-                )
+                    priority: priority_value,
+                    deadline: deadline_ts,
+                    reminder: reminder_ts,
+                    recurrence: recurrence.as_deref(),
+                })
                 .map_err(|e| e.to_string())?;
             println!("Added task {}", id);
             Ok(())
@@ -107,11 +117,14 @@ pub fn run_cli(cli: Cli) -> Result<(), String> {
         }
         Commands::Done { id } => {
             let db = Db::new().map_err(|e| e.to_string())?;
-            let updated = db.mark_done(id).map_err(|e| e.to_string())?;
+            let (updated, new_id) = db.complete_task(id).map_err(|e| e.to_string())?;
             if updated == 0 {
                 return Err(format!("No task with id {}", id));
             }
             println!("Marked task {} as done", id);
+            if let Some(new_id) = new_id {
+                println!("Created recurring task {}", new_id);
+            }
             Ok(())
         }
         Commands::Delete { id } => {
@@ -127,6 +140,8 @@ pub fn run_cli(cli: Cli) -> Result<(), String> {
             crate::notify::run_notify(snooze_minutes).map_err(|e| e.to_string())
         }
         Commands::Ui => crate::tui::run_tui().map_err(|e| e.to_string()),
+        Commands::Today => run_agenda(3).map_err(|e| e.to_string()),
+        Commands::Week => run_agenda(7).map_err(|e| e.to_string()),
         Commands::Project { command } => {
             let mut db = Db::new().map_err(|e| e.to_string())?;
             match command {
@@ -175,6 +190,90 @@ pub fn run_cli(cli: Cli) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn run_agenda(window_days: i64) -> Result<(), Box<dyn std::error::Error>> {
+    let db = Db::new()?;
+    let today = Local::now().date_naive();
+    let end_date = today + Duration::days(window_days);
+    let end_ts = end_of_day_ts(end_date)?;
+    let tasks = db.tasks_due_before(end_ts)?;
+
+    let mut overdue = Vec::new();
+    let mut due_today = Vec::new();
+    let mut upcoming = Vec::new();
+
+    for task in tasks {
+        if let Some(deadline_ts) = task.deadline {
+            if let Some(deadline_date) = deadline_date(deadline_ts) {
+                if deadline_date < today {
+                    overdue.push(task);
+                } else if deadline_date == today {
+                    due_today.push(task);
+                } else {
+                    upcoming.push(task);
+                }
+            }
+        }
+    }
+
+    if overdue.is_empty() && due_today.is_empty() && upcoming.is_empty() {
+        println!("No tasks due.");
+        return Ok(());
+    }
+
+    print_agenda_section("Overdue", &overdue, today, true);
+    print_agenda_section("Today", &due_today, today, false);
+    print_agenda_section("Upcoming", &upcoming, today, false);
+
+    Ok(())
+}
+
+fn deadline_date(deadline_ts: i64) -> Option<NaiveDate> {
+    Local
+        .timestamp_opt(deadline_ts, 0)
+        .single()
+        .map(|dt| dt.date_naive())
+}
+
+fn end_of_day_ts(date: NaiveDate) -> Result<i64, Box<dyn std::error::Error>> {
+    let next_day = date + Duration::days(1);
+    let naive = next_day
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| "Invalid day boundary".to_string())?;
+    let dt = Local
+        .from_local_datetime(&naive)
+        .single()
+        .or_else(|| Local.from_local_datetime(&naive).earliest())
+        .or_else(|| Local.from_local_datetime(&naive).latest())
+        .ok_or_else(|| "Invalid or ambiguous local time".to_string())?;
+    Ok(dt.timestamp() - 1)
+}
+
+fn print_agenda_section(title: &str, tasks: &[crate::task::Task], today: NaiveDate, overdue: bool) {
+    println!("{}", title);
+    println!("{}", "-".repeat(title.len()));
+    if tasks.is_empty() {
+        println!("(none)\n");
+        return;
+    }
+
+    for task in tasks {
+        let deadline_label = task
+            .deadline
+            .and_then(deadline_date)
+            .map(|date| {
+                if date == today {
+                    "due today".to_string()
+                } else {
+                    format!("due {}", date.format("%Y-%m-%d"))
+                }
+            })
+            .unwrap_or_else(|| "no deadline".to_string());
+        let marker = if overdue { "[!]" } else { "[ ]" };
+        println!("{} {} ({})", marker, task.title, deadline_label);
+    }
+    println!();
 }
 
 fn parse_optional_datetime(input: Option<String>) -> Result<Option<i64>, String> {
@@ -236,4 +335,22 @@ fn parse_priority(input: &str) -> Result<i64, String> {
         }
     };
     Ok(normalize_priority(value))
+}
+
+fn parse_recurrence(input: Option<&str>) -> Result<Option<String>, String> {
+    let value = match input {
+        Some(value) => value.trim(),
+        None => return Ok(None),
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let normalized = value.to_lowercase();
+    match normalized.as_str() {
+        "daily" | "weekly" | "monthly" | "yearly" => Ok(Some(normalized)),
+        _ => Err(format!(
+            "Invalid recurrence: {} (use daily, weekly, monthly, yearly)",
+            value
+        )),
+    }
 }

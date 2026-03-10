@@ -28,20 +28,26 @@ pub enum AddField {
     Project,
     Deadline,
     Reminder,
+    Repeat,
     Priority,
+    Description,
 }
 
 #[derive(Debug, Clone)]
 pub struct AddForm {
     pub title: String,
+    pub description: String,
     pub deadline: String,
     pub reminder: String,
+    pub repeat: String,
     pub project_index: usize,
     pub field: AddField,
     pub priority: i64,
     pub cursor_title: usize,
+    pub cursor_description: usize,
     pub cursor_deadline: usize,
     pub cursor_reminder: usize,
+    pub cursor_repeat: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -307,14 +313,18 @@ impl Default for AddForm {
     fn default() -> Self {
         Self {
             title: String::new(),
+            description: String::new(),
             deadline: String::new(),
             reminder: String::new(),
+            repeat: String::new(),
             project_index: 0,
             field: AddField::Title,
             priority: 1,
             cursor_title: 0,
+            cursor_description: 0,
             cursor_deadline: 0,
             cursor_reminder: 0,
+            cursor_repeat: 0,
         }
     }
 }

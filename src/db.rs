@@ -1,5 +1,5 @@
 use crate::project::Project;
-use crate::task::{status_from_db, status_to_db, Status, Task};
+use crate::task::{next_recurrence_timestamp, status_from_db, status_to_db, Status, Task};
 use rusqlite::{params, Connection};
 use std::env;
 use std::fs;
@@ -7,6 +7,26 @@ use std::path::{Path, PathBuf};
 
 pub struct Db {
     conn: Connection,
+}
+
+pub struct NewTask<'a> {
+    pub title: &'a str,
+    pub description: Option<&'a str>,
+    pub project_id: Option<i64>,
+    pub priority: i64,
+    pub deadline: Option<i64>,
+    pub reminder: Option<i64>,
+    pub recurrence: Option<&'a str>,
+}
+
+pub struct UpdateTask<'a> {
+    pub title: &'a str,
+    pub description: Option<&'a str>,
+    pub project_id: Option<i64>,
+    pub priority: i64,
+    pub deadline: Option<i64>,
+    pub reminder: Option<i64>,
+    pub recurrence: Option<&'a str>,
 }
 
 impl Db {
@@ -33,6 +53,7 @@ impl Db {
         self.ensure_projects_table()?;
         self.ensure_project_column()?;
         self.ensure_status_column()?;
+        self.ensure_recurrence_column()?;
         self.ensure_default_project()
     }
 
@@ -109,6 +130,23 @@ impl Db {
         Ok(())
     }
 
+    fn ensure_recurrence_column(&self) -> rusqlite::Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(tasks)")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_recurrence = false;
+        for name in rows {
+            if name? == "recurrence" {
+                has_recurrence = true;
+                break;
+            }
+        }
+        if !has_recurrence {
+            self.conn
+                .execute("ALTER TABLE tasks ADD COLUMN recurrence TEXT", [])?;
+        }
+        Ok(())
+    }
+
     fn ensure_default_project(&self) -> rusqlite::Result<()> {
         let default_id = match self.project_id_by_name("All")? {
             Some(id) => id,
@@ -136,29 +174,22 @@ impl Db {
         }
     }
 
-    pub fn add_task(
-        &self,
-        title: &str,
-        description: Option<&str>,
-        project_id: Option<i64>,
-        priority: i64,
-        deadline: Option<i64>,
-        reminder: Option<i64>,
-    ) -> rusqlite::Result<i64> {
-        let project_id = match project_id {
+    pub fn add_task(&self, task: NewTask<'_>) -> rusqlite::Result<i64> {
+        let project_id = match task.project_id {
             Some(id) => Some(id),
             None => Some(self.default_project_id()?),
         };
         self.conn.execute(
-            "INSERT INTO tasks (title, description, project_id, status, priority, deadline, reminder, completed) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+            "INSERT INTO tasks (title, description, project_id, status, priority, deadline, reminder, recurrence, completed) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)",
             params![
-                title,
-                description,
+                task.title,
+                task.description,
                 project_id,
                 status_to_db(Status::Todo),
-                priority,
-                deadline,
-                reminder
+                task.priority,
+                task.deadline,
+                task.reminder,
+                task.recurrence
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -166,7 +197,7 @@ impl Db {
 
     pub fn list_tasks(&self) -> rusqlite::Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, description, project_id, status, priority, deadline, reminder, completed \
+            "SELECT id, title, description, project_id, status, priority, deadline, reminder, recurrence, completed \
              FROM tasks ORDER BY CASE status WHEN 'TODO' THEN 0 WHEN 'IN_PROGRESS' THEN 1 WHEN 'DONE' THEN 2 ELSE 3 END, id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -179,6 +210,7 @@ impl Db {
                 priority: row.get::<_, Option<i64>>(5)?.unwrap_or(1),
                 deadline: row.get(6)?,
                 reminder: row.get(7)?,
+                recurrence: row.get(8)?,
             })
         })?;
 
@@ -191,7 +223,7 @@ impl Db {
 
     pub fn list_tasks_for_project(&self, project_id: i64) -> rusqlite::Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, description, project_id, status, priority, deadline, reminder, completed \
+            "SELECT id, title, description, project_id, status, priority, deadline, reminder, recurrence, completed \
              FROM tasks WHERE project_id = ?1 ORDER BY CASE status WHEN 'TODO' THEN 0 WHEN 'IN_PROGRESS' THEN 1 WHEN 'DONE' THEN 2 ELSE 3 END, id ASC",
         )?;
         let rows = stmt.query_map(params![project_id], |row| {
@@ -204,6 +236,7 @@ impl Db {
                 priority: row.get::<_, Option<i64>>(5)?.unwrap_or(1),
                 deadline: row.get(6)?,
                 reminder: row.get(7)?,
+                recurrence: row.get(8)?,
             })
         })?;
 
@@ -284,6 +317,13 @@ impl Db {
     }
 
     pub fn set_task_status(&self, id: i64, status: Status) -> rusqlite::Result<usize> {
+        if matches!(status, Status::Done) {
+            return self.complete_task(id).map(|(updated, _)| updated);
+        }
+        self.set_task_status_raw(id, status)
+    }
+
+    fn set_task_status_raw(&self, id: i64, status: Status) -> rusqlite::Result<usize> {
         let completed = matches!(status, Status::Done);
         self.conn.execute(
             "UPDATE tasks SET status = ?1, completed = ?2 WHERE id = ?3",
@@ -291,27 +331,90 @@ impl Db {
         )
     }
 
+    pub fn complete_task(&self, id: i64) -> rusqlite::Result<(usize, Option<i64>)> {
+        let task = match self.task_by_id(id)? {
+            Some(task) => task,
+            None => return Ok((0, None)),
+        };
+        if matches!(task.status, Status::Done) {
+            return Ok((0, None));
+        }
+
+        let updated = self.set_task_status_raw(id, Status::Done)?;
+        if updated == 0 {
+            return Ok((0, None));
+        }
+
+        let recurrence = match task.recurrence.as_deref() {
+            Some(value) => value,
+            None => return Ok((updated, None)),
+        };
+
+        let next_deadline = task
+            .deadline
+            .and_then(|ts| next_recurrence_timestamp(ts, recurrence));
+        let next_reminder = task
+            .reminder
+            .and_then(|ts| next_recurrence_timestamp(ts, recurrence));
+
+        let new_id = self.add_task(NewTask {
+            title: &task.title,
+            description: task.description.as_deref(),
+            project_id: task.project_id,
+            priority: task.priority,
+            deadline: next_deadline,
+            reminder: next_reminder,
+            recurrence: Some(recurrence),
+        })?;
+
+        Ok((updated, Some(new_id)))
+    }
+
+    pub fn task_by_id(&self, id: i64) -> rusqlite::Result<Option<Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, description, project_id, status, priority, deadline, reminder, recurrence, completed \
+             FROM tasks WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Task {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: row.get(2)?,
+                project_id: row.get(3)?,
+                status: status_from_db(row.get(4)?),
+                priority: row.get::<_, Option<i64>>(5)?.unwrap_or(1),
+                deadline: row.get(6)?,
+                reminder: row.get(7)?,
+                recurrence: row.get(8)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn delete_task(&self, id: i64) -> rusqlite::Result<usize> {
         self.conn
             .execute("DELETE FROM tasks WHERE id = ?1", params![id])
     }
 
-    pub fn update_task(
-        &self,
-        id: i64,
-        title: &str,
-        project_id: Option<i64>,
-        priority: i64,
-        deadline: Option<i64>,
-        reminder: Option<i64>,
-    ) -> rusqlite::Result<usize> {
-        let project_id = match project_id {
+    pub fn update_task(&self, id: i64, task: UpdateTask<'_>) -> rusqlite::Result<usize> {
+        let project_id = match task.project_id {
             Some(id) => Some(id),
             None => Some(self.default_project_id()?),
         };
         self.conn.execute(
-            "UPDATE tasks SET title = ?1, project_id = ?2, priority = ?3, deadline = ?4, reminder = ?5 WHERE id = ?6",
-            params![title, project_id, priority, deadline, reminder, id],
+            "UPDATE tasks SET title = ?1, description = ?2, project_id = ?3, priority = ?4, deadline = ?5, reminder = ?6, recurrence = ?7 WHERE id = ?8",
+            params![
+                task.title,
+                task.description,
+                project_id,
+                task.priority,
+                task.deadline,
+                task.reminder,
+                task.recurrence,
+                id
+            ],
         )
     }
 
@@ -324,7 +427,7 @@ impl Db {
 
     pub fn due_reminders(&self, now: i64) -> rusqlite::Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, description, project_id, status, priority, deadline, reminder, completed FROM tasks \
+            "SELECT id, title, description, project_id, status, priority, deadline, reminder, recurrence, completed FROM tasks \
              WHERE reminder IS NOT NULL AND reminder <= ?1 AND completed = 0 \
              ORDER BY reminder ASC",
         )?;
@@ -338,6 +441,34 @@ impl Db {
                 priority: row.get::<_, Option<i64>>(5)?.unwrap_or(1),
                 deadline: row.get(6)?,
                 reminder: row.get(7)?,
+                recurrence: row.get(8)?,
+            })
+        })?;
+
+        let mut tasks = Vec::new();
+        for task in rows {
+            tasks.push(task?);
+        }
+        Ok(tasks)
+    }
+
+    pub fn tasks_due_before(&self, end_ts: i64) -> rusqlite::Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, description, project_id, status, priority, deadline, reminder, recurrence, completed FROM tasks \
+             WHERE deadline IS NOT NULL AND deadline <= ?1 AND status != 'DONE' \
+             ORDER BY deadline ASC",
+        )?;
+        let rows = stmt.query_map(params![end_ts], |row| {
+            Ok(Task {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: row.get(2)?,
+                project_id: row.get(3)?,
+                status: status_from_db(row.get(4)?),
+                priority: row.get::<_, Option<i64>>(5)?.unwrap_or(1),
+                deadline: row.get(6)?,
+                reminder: row.get(7)?,
+                recurrence: row.get(8)?,
             })
         })?;
 
@@ -369,7 +500,15 @@ mod tests {
         let db = Db::new_with_path(&path).unwrap();
 
         let id = db
-            .add_task("Test", None, None, 1, Some(123), Some(120))
+            .add_task(NewTask {
+                title: "Test",
+                description: None,
+                project_id: None,
+                priority: 1,
+                deadline: Some(123),
+                reminder: Some(120),
+                recurrence: None,
+            })
             .unwrap();
         let tasks = db.list_tasks().unwrap();
         assert_eq!(tasks.len(), 1);
@@ -390,12 +529,112 @@ mod tests {
         let path = dir.path().join("tasks.db");
         let db = Db::new_with_path(&path).unwrap();
 
-        db.add_task("Soon", None, None, 1, None, Some(100)).unwrap();
-        db.add_task("Later", None, None, 1, None, Some(200))
-            .unwrap();
+        db.add_task(NewTask {
+            title: "Soon",
+            description: None,
+            project_id: None,
+            priority: 1,
+            deadline: None,
+            reminder: Some(100),
+            recurrence: None,
+        })
+        .unwrap();
+        db.add_task(NewTask {
+            title: "Later",
+            description: None,
+            project_id: None,
+            priority: 1,
+            deadline: None,
+            reminder: Some(200),
+            recurrence: None,
+        })
+        .unwrap();
 
         let due = db.due_reminders(150).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].title, "Soon");
+    }
+
+    #[test]
+    fn tasks_due_before_filters() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let db = Db::new_with_path(&path).unwrap();
+
+        let soon = db
+            .add_task(NewTask {
+                title: "Soon",
+                description: None,
+                project_id: None,
+                priority: 1,
+                deadline: Some(100),
+                reminder: None,
+                recurrence: None,
+            })
+            .unwrap();
+        db.add_task(NewTask {
+            title: "Due",
+            description: None,
+            project_id: None,
+            priority: 1,
+            deadline: Some(150),
+            reminder: None,
+            recurrence: None,
+        })
+        .unwrap();
+        db.add_task(NewTask {
+            title: "Later",
+            description: None,
+            project_id: None,
+            priority: 1,
+            deadline: Some(300),
+            reminder: None,
+            recurrence: None,
+        })
+        .unwrap();
+        db.add_task(NewTask {
+            title: "No deadline",
+            description: None,
+            project_id: None,
+            priority: 1,
+            deadline: None,
+            reminder: None,
+            recurrence: None,
+        })
+        .unwrap();
+        db.mark_done(soon).unwrap();
+
+        let due = db.tasks_due_before(200).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].title, "Due");
+    }
+
+    #[test]
+    fn recurring_task_creates_next() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let db = Db::new_with_path(&path).unwrap();
+
+        let id = db
+            .add_task(NewTask {
+                title: "Daily",
+                description: None,
+                project_id: None,
+                priority: 1,
+                deadline: Some(1000),
+                reminder: Some(2000),
+                recurrence: Some("daily"),
+            })
+            .unwrap();
+
+        let (_, new_id) = db.complete_task(id).unwrap();
+        let new_id = new_id.expect("new task created");
+        let task = db.task_by_id(new_id).unwrap().expect("task exists");
+
+        assert_eq!(task.title, "Daily");
+        assert_eq!(task.recurrence.as_deref(), Some("daily"));
+        assert_eq!(task.deadline, Some(1000 + 86400));
+        assert_eq!(task.reminder, Some(2000 + 86400));
+        assert!(matches!(task.status, Status::Todo));
     }
 }

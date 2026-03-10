@@ -2,7 +2,19 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
 const DEFAULT_SOUND: &str = "/usr/share/sounds/freedesktop/stereo/message.oga";
+#[cfg(target_os = "macos")]
+const DEFAULT_SOUND: &str = "/System/Library/Sounds/Ping.aiff";
+#[cfg(target_os = "windows")]
+const DEFAULT_SOUND: &str = "";
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+const DEFAULT_SOUND: &str = "";
+
+#[cfg(target_os = "windows")]
+const DEFAULT_ENABLE_SOUND: bool = false;
+#[cfg(not(target_os = "windows"))]
+const DEFAULT_ENABLE_SOUND: bool = true;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -23,7 +35,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            enable_sound: true,
+            enable_sound: DEFAULT_ENABLE_SOUND,
             sound_file: DEFAULT_SOUND.to_string(),
         }
     }
@@ -91,7 +103,7 @@ mod tests {
     #[test]
     fn parse_config_defaults() {
         let config = parse_config("");
-        assert!(config.enable_sound);
+        assert_eq!(config.enable_sound, DEFAULT_ENABLE_SOUND);
         assert_eq!(config.sound_file, DEFAULT_SOUND);
     }
 

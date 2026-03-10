@@ -64,22 +64,38 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
                 (
                     task.id,
                     task.title.clone(),
+                    task.description.clone(),
                     task.project_id,
                     task.priority,
                     task.deadline,
                     task.reminder,
+                    task.recurrence.clone(),
                 )
             });
-            if let Some((id, title, project_id, priority, deadline, reminder)) = snapshot {
+            if let Some((
+                id,
+                title,
+                description,
+                project_id,
+                priority,
+                deadline,
+                reminder,
+                recurrence,
+            )) = snapshot
+            {
                 app.edit_id = Some(id);
                 app.add_form.title = title;
+                app.add_form.description = description.unwrap_or_default();
                 app.add_form.deadline = format_datetime_input(deadline);
                 app.add_form.reminder = format_datetime_input(reminder);
+                app.add_form.repeat = recurrence.unwrap_or_default();
                 app.add_form.priority = priority;
                 app.add_form.project_index = app.project_index_by_id(project_id);
                 app.add_form.cursor_title = app.add_form.title.chars().count();
+                app.add_form.cursor_description = app.add_form.description.chars().count();
                 app.add_form.cursor_deadline = app.add_form.deadline.chars().count();
                 app.add_form.cursor_reminder = app.add_form.reminder.chars().count();
+                app.add_form.cursor_repeat = app.add_form.repeat.chars().count();
                 app.add_form.field = AddField::Title;
                 app.mode = Mode::AddTask;
                 app.set_status("");
@@ -189,29 +205,46 @@ fn handle_add(app: &mut App, key: KeyEvent) {
                     }
                 }
             };
+            let recurrence = match parse_recurrence_input(app.add_form.repeat.trim()) {
+                Ok(value) => value,
+                Err(err) => {
+                    app.set_status(err);
+                    return;
+                }
+            };
+            let description = if app.add_form.description.trim().is_empty() {
+                None
+            } else {
+                Some(app.add_form.description.trim())
+            };
             let priority = normalize_priority(app.add_form.priority);
             if let Some(id) = app.edit_id {
                 if let Err(err) = app.db.update_task(
                     id,
-                    app.add_form.title.trim(),
-                    project_id,
-                    priority,
-                    deadline,
-                    reminder,
+                    crate::db::UpdateTask {
+                        title: app.add_form.title.trim(),
+                        description,
+                        project_id,
+                        priority,
+                        deadline,
+                        reminder,
+                        recurrence: recurrence.as_deref(),
+                    },
                 ) {
                     app.set_status(err.to_string());
                     return;
                 }
                 app.set_status("Task updated");
             } else {
-                if let Err(err) = app.db.add_task(
-                    app.add_form.title.trim(),
-                    None,
+                if let Err(err) = app.db.add_task(crate::db::NewTask {
+                    title: app.add_form.title.trim(),
+                    description,
                     project_id,
                     priority,
                     deadline,
                     reminder,
-                ) {
+                    recurrence: recurrence.as_deref(),
+                }) {
                     app.set_status(err.to_string());
                     return;
                 }
@@ -222,7 +255,10 @@ fn handle_add(app: &mut App, key: KeyEvent) {
             app.edit_id = None;
         }
         KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if matches!(app.add_form.field, AddField::Deadline | AddField::Reminder) {
+            if matches!(
+                app.add_form.field,
+                AddField::Deadline | AddField::Reminder
+            ) {
                 app.calendar_target = Some(if app.add_form.field == AddField::Deadline {
                     CalendarTarget::Deadline
                 } else {
@@ -406,6 +442,10 @@ fn handle_time(app: &mut App, key: KeyEvent) {
 fn current_field_and_cursor_mut(app: &mut App) -> Option<(&mut String, &mut usize)> {
     match app.add_form.field {
         AddField::Title => Some((&mut app.add_form.title, &mut app.add_form.cursor_title)),
+        AddField::Description => Some((
+            &mut app.add_form.description,
+            &mut app.add_form.cursor_description,
+        )),
         AddField::Project => None,
         AddField::Deadline => Some((
             &mut app.add_form.deadline,
@@ -415,6 +455,7 @@ fn current_field_and_cursor_mut(app: &mut App) -> Option<(&mut String, &mut usiz
             &mut app.add_form.reminder,
             &mut app.add_form.cursor_reminder,
         )),
+        AddField::Repeat => Some((&mut app.add_form.repeat, &mut app.add_form.cursor_repeat)),
         AddField::Priority => None,
     }
 }
@@ -424,34 +465,44 @@ fn next_field(field: AddField) -> AddField {
         AddField::Title => AddField::Project,
         AddField::Project => AddField::Deadline,
         AddField::Deadline => AddField::Reminder,
-        AddField::Reminder => AddField::Priority,
-        AddField::Priority => AddField::Title,
+        AddField::Reminder => AddField::Repeat,
+        AddField::Repeat => AddField::Priority,
+        AddField::Priority => AddField::Description,
+        AddField::Description => AddField::Title,
     }
 }
 
 fn prev_field(field: AddField) -> AddField {
     match field {
-        AddField::Title => AddField::Priority,
+        AddField::Title => AddField::Description,
         AddField::Project => AddField::Title,
         AddField::Deadline => AddField::Project,
         AddField::Reminder => AddField::Deadline,
-        AddField::Priority => AddField::Reminder,
+        AddField::Repeat => AddField::Reminder,
+        AddField::Priority => AddField::Repeat,
+        AddField::Description => AddField::Priority,
     }
 }
 
 fn clamp_cursor(app: &mut App) {
     let len = match app.add_form.field {
         AddField::Title => app.add_form.title.chars().count(),
+        AddField::Description => app.add_form.description.chars().count(),
         AddField::Project => return,
         AddField::Deadline => app.add_form.deadline.chars().count(),
         AddField::Reminder => app.add_form.reminder.chars().count(),
+        AddField::Repeat => app.add_form.repeat.chars().count(),
         AddField::Priority => return,
     };
     match app.add_form.field {
         AddField::Title => app.add_form.cursor_title = app.add_form.cursor_title.min(len),
+        AddField::Description => {
+            app.add_form.cursor_description = app.add_form.cursor_description.min(len)
+        }
         AddField::Project => {}
         AddField::Deadline => app.add_form.cursor_deadline = app.add_form.cursor_deadline.min(len),
         AddField::Reminder => app.add_form.cursor_reminder = app.add_form.cursor_reminder.min(len),
+        AddField::Repeat => app.add_form.cursor_repeat = app.add_form.cursor_repeat.min(len),
         AddField::Priority => {}
     }
 }
@@ -462,6 +513,10 @@ fn move_cursor(app: &mut App, delta: i32) {
             app.add_form.title.chars().count(),
             &mut app.add_form.cursor_title,
         ),
+        AddField::Description => (
+            app.add_form.description.chars().count(),
+            &mut app.add_form.cursor_description,
+        ),
         AddField::Project => return,
         AddField::Deadline => (
             app.add_form.deadline.chars().count(),
@@ -470,6 +525,10 @@ fn move_cursor(app: &mut App, delta: i32) {
         AddField::Reminder => (
             app.add_form.reminder.chars().count(),
             &mut app.add_form.cursor_reminder,
+        ),
+        AddField::Repeat => (
+            app.add_form.repeat.chars().count(),
+            &mut app.add_form.cursor_repeat,
         ),
         AddField::Priority => return,
     };
@@ -516,6 +575,21 @@ fn char_to_byte_index(value: &str, cursor: usize) -> usize {
         .nth(cursor)
         .map(|(idx, _)| idx)
         .unwrap_or_else(|| value.len())
+}
+
+fn parse_recurrence_input(input: &str) -> Result<Option<String>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let normalized = trimmed.to_lowercase();
+    match normalized.as_str() {
+        "daily" | "weekly" | "monthly" | "yearly" => Ok(Some(normalized)),
+        _ => Err(format!(
+            "Invalid recurrence: {} (use daily, weekly, monthly, yearly)",
+            trimmed
+        )),
+    }
 }
 
 fn extract_time(input: &str) -> Option<NaiveTime> {

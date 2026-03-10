@@ -197,7 +197,7 @@ fn draw_add_popup(frame: &mut Frame, app: &App) {
         vertical: 1,
         horizontal: 2,
     });
-    let lines = vec![
+    let mut lines = vec![
         line_with_label(
             "Title",
             &app.add_form.title,
@@ -219,11 +219,22 @@ fn draw_add_popup(frame: &mut Frame, app: &App) {
             app.add_form.field == AddField::Reminder,
         ),
         line_with_label(
+            "Repeat (daily/weekly/monthly/yearly)",
+            &app.add_form.repeat,
+            app.add_form.field == AddField::Repeat,
+        ),
+        line_with_label(
             "Priority",
             priority_label(app.add_form.priority),
             app.add_form.field == AddField::Priority,
         ),
     ];
+    lines.extend(wrap_label_lines(
+        "Description",
+        &app.add_form.description,
+        app.add_form.field == AddField::Description,
+        inner.width,
+    ));
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
 
@@ -333,6 +344,102 @@ fn line_with_label(label: &str, value: &str, active: bool) -> Line<'static> {
     ])
 }
 
+fn wrap_label_lines(
+    label: &str,
+    value: &str,
+    active: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let label_prefix = format!("{}: ", label);
+    let label_len = label_prefix.chars().count();
+    let available = width as usize;
+    let label_style = if active {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    if available == 0 {
+        return vec![Line::from(vec![Span::styled(label_prefix, label_style)])];
+    }
+
+    let value_chunks = wrap_chunks(value, available.saturating_sub(label_len));
+    let mut lines = Vec::new();
+    for (idx, chunk) in value_chunks.into_iter().enumerate() {
+        if idx == 0 {
+            lines.push(Line::from(vec![
+                Span::styled(label_prefix.clone(), label_style),
+                Span::raw(chunk),
+            ]));
+        } else {
+            let indent = " ".repeat(label_len);
+            lines.push(Line::from(vec![Span::raw(indent), Span::raw(chunk)]));
+        }
+    }
+    lines
+}
+
+fn wrap_chunks(value: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![value.to_string()];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut count = 0;
+    for ch in value.chars() {
+        if count >= width {
+            chunks.push(current);
+            current = String::new();
+            count = 0;
+        }
+        current.push(ch);
+        count += 1;
+    }
+    if current.is_empty() {
+        if chunks.is_empty() {
+            chunks.push(String::new());
+        }
+    } else {
+        chunks.push(current);
+    }
+    chunks
+}
+
+fn description_cursor_position(
+    inner: Rect,
+    label_prefix: &str,
+    cursor: usize,
+    base_row: u16,
+) -> Option<(u16, u16)> {
+    let width = inner.width as usize;
+    if width == 0 {
+        return None;
+    }
+    let label_len = label_prefix.chars().count();
+    if width <= label_len {
+        let x = inner.x + inner.width.saturating_sub(1);
+        let y = inner.y + base_row;
+        return Some((x, y));
+    }
+
+    let avail = width - label_len;
+    let mut row_offset = cursor / avail;
+    let mut col_offset = cursor % avail;
+    if cursor > 0 && col_offset == 0 {
+        row_offset = row_offset.saturating_sub(1);
+        col_offset = avail;
+    }
+    let mut x = inner.x + label_len as u16 + col_offset as u16;
+    let max_x = inner.x + inner.width.saturating_sub(1);
+    if x > max_x {
+        x = max_x;
+    }
+    let y = inner.y + base_row + row_offset as u16;
+    Some((x, y))
+}
+
 fn priority_style(priority: i64) -> Style {
     match priority {
         4 => Style::default().fg(Color::Red),
@@ -358,7 +465,20 @@ fn cursor_position_add(app: &App, inner: Rect) -> Option<(u16, u16)> {
             "Reminder (YYYY-MM-DD HH:MM): ".len(),
             app.add_form.cursor_reminder,
         ),
+        AddField::Repeat => (
+            4,
+            "Repeat (daily/weekly/monthly/yearly): ".len(),
+            app.add_form.cursor_repeat,
+        ),
         AddField::Priority => return None,
+        AddField::Description => {
+            return description_cursor_position(
+                inner,
+                "Description: ",
+                app.add_form.cursor_description,
+                6,
+            )
+        }
     };
     let x = inner.x + label_len as u16 + cursor_pos as u16;
     let y = inner.y + row_index as u16;

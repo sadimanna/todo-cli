@@ -7,7 +7,6 @@ edition = "2021"
 clap = { version = "4", features = ["derive"] }
 chrono = "0.4"
 rusqlite = { version = "0.31" }
-notify-rust = "4"
 ratatui = "0.27"
 crossterm = "0.27"
 fuzzy-matcher = "0.3"

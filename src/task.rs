@@ -1,4 +1,4 @@
-use chrono::{Local, NaiveDateTime, TimeZone};
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -17,6 +17,7 @@ pub struct Task {
     pub priority: i64,
     pub deadline: Option<i64>,
     pub reminder: Option<i64>,
+    pub recurrence: Option<String>,
 }
 
 pub fn parse_datetime_local(input: &str) -> Result<i64, String> {
@@ -93,6 +94,49 @@ pub fn priority_label(priority: i64) -> &'static str {
 
 pub fn normalize_priority(priority: i64) -> i64 {
     priority.clamp(0, 4)
+}
+
+pub fn next_recurrence_timestamp(ts: i64, recurrence: &str) -> Option<i64> {
+    match recurrence {
+        "daily" => Some(ts + Duration::days(1).num_seconds()),
+        "weekly" => Some(ts + Duration::days(7).num_seconds()),
+        "monthly" => add_months(ts, 1),
+        "yearly" => add_months(ts, 12),
+        _ => None,
+    }
+}
+
+fn add_months(ts: i64, months: i32) -> Option<i64> {
+    let dt = Local.timestamp_opt(ts, 0).single()?;
+    let date = dt.date_naive();
+    let time = dt.time();
+    let total_months = date.year() * 12 + (date.month() as i32 - 1) + months;
+    let new_year = total_months.div_euclid(12);
+    let new_month = total_months.rem_euclid(12) + 1;
+    let last_day = last_day_of_month(new_year, new_month as u32)?;
+    let day = date.day().min(last_day);
+    let new_date = NaiveDate::from_ymd_opt(new_year, new_month as u32, day)?;
+    let new_naive = new_date.and_hms_opt(time.hour(), time.minute(), time.second())?;
+    local_timestamp(new_naive)
+}
+
+fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
+    let next_month = if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)?
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)?
+    };
+    let last = next_month - Duration::days(1);
+    Some(last.day())
+}
+
+fn local_timestamp(naive: NaiveDateTime) -> Option<i64> {
+    Local
+        .from_local_datetime(&naive)
+        .single()
+        .or_else(|| Local.from_local_datetime(&naive).earliest())
+        .or_else(|| Local.from_local_datetime(&naive).latest())
+        .map(|dt| dt.timestamp())
 }
 
 #[cfg(test)]

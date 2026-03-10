@@ -2,7 +2,7 @@
 Description=Run todo reminders every minute
 
 [Timer]
-OnUnitActiveSec=60s
+OnCalendar=*:0/1
 Persistent=true
 
 [Install]
