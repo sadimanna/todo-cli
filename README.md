@@ -11,6 +11,12 @@ Features:
 - systemd user timer for reminder checks
 - Interactive TUI (ratatui + crossterm) with search and calendar picker
 
+<p align="center">
+  <img src="assets/todo-cli_1.png" width="48%" />
+  <img src="assets/todo-cli_2.png" width="48%" />
+</p>
+
+
 ## Requirements
 
 - Rust toolchain (cargo)
