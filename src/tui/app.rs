@@ -179,11 +179,7 @@ impl App {
     }
 
     pub fn select_project_by_id(&mut self, id: i64) {
-        if let Some(index) = self
-            .projects
-            .iter()
-            .position(|entry| entry.id == Some(id))
-        {
+        if let Some(index) = self.projects.iter().position(|entry| entry.id == Some(id)) {
             self.selected_project = index;
         }
     }
@@ -258,12 +254,7 @@ impl App {
 
     pub fn move_column(&mut self, delta: i32) {
         let mut next = self.board.column as i32 + delta;
-        if next < 0 {
-            next = 0;
-        }
-        if next > 2 {
-            next = 2;
-        }
+        next = next.clamp(0, 2);
         self.board.column = next as usize;
         self.clamp_board();
     }

@@ -191,17 +191,14 @@ fn handle_add(app: &mut App, key: KeyEvent) {
             };
             let priority = normalize_priority(app.add_form.priority);
             if let Some(id) = app.edit_id {
-                if let Err(err) =
-                    app.db
-                        .update_task(
-                            id,
-                            app.add_form.title.trim(),
-                            project_id,
-                            priority,
-                            deadline,
-                            reminder,
-                        )
-                {
+                if let Err(err) = app.db.update_task(
+                    id,
+                    app.add_form.title.trim(),
+                    project_id,
+                    priority,
+                    deadline,
+                    reminder,
+                ) {
                     app.set_status(err.to_string());
                     return;
                 }
@@ -632,12 +629,7 @@ fn move_selected_task(app: &mut App, delta: i32) {
     let snapshot = app.selected_task().map(|task| (task.id, task.status));
     if let Some((id, status)) = snapshot {
         let mut next_col = status_column(status) as i32 + delta;
-        if next_col < 0 {
-            next_col = 0;
-        }
-        if next_col > 2 {
-            next_col = 2;
-        }
+        next_col = next_col.clamp(0, 2);
         let next_status = status_from_column(next_col as usize);
         if app.db.set_task_status(id, next_status).is_ok() {
             let _ = app.refresh_tasks();

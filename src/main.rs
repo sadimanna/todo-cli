@@ -1,7 +1,9 @@
 mod cli;
+mod config;
 mod db;
 mod notify;
 mod project;
+mod sound;
 mod task;
 mod tui;
 

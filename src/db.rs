@@ -390,8 +390,7 @@ mod tests {
         let path = dir.path().join("tasks.db");
         let db = Db::new_with_path(&path).unwrap();
 
-        db.add_task("Soon", None, None, 1, None, Some(100))
-            .unwrap();
+        db.add_task("Soon", None, None, 1, None, Some(100)).unwrap();
         db.add_task("Later", None, None, 1, None, Some(200))
             .unwrap();
 

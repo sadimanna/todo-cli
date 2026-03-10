@@ -44,7 +44,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let title = match app.mode {
-        Mode::Search => format!("Todo ({}) (search: {})", app.active_project_name(), app.search_query),
+        Mode::Search => format!(
+            "Todo ({}) (search: {})",
+            app.active_project_name(),
+            app.search_query
+        ),
         Mode::AddTask => "Todo (add task)".to_string(),
         Mode::Calendar => "Todo (calendar)".to_string(),
         Mode::Time => "Todo (time)".to_string(),

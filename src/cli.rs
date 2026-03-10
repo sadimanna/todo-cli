@@ -1,5 +1,7 @@
 use crate::db::Db;
-use crate::task::{format_datetime, normalize_priority, parse_datetime_local, priority_label, status_label};
+use crate::task::{
+    format_datetime, normalize_priority, parse_datetime_local, priority_label, status_label,
+};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -77,12 +79,7 @@ pub fn run_cli(cli: Cli) -> Result<(), String> {
             let project_id = match project {
                 Some(name) => match db.project_id_by_name(&name).map_err(|e| e.to_string())? {
                     Some(id) => Some(id),
-                    None => {
-                        return Err(format!(
-                            "No project named '{}' (create it first)",
-                            name
-                        ))
-                    }
+                    None => return Err(format!("No project named '{}' (create it first)", name)),
                 },
                 None => None,
             };
@@ -164,12 +161,7 @@ pub fn run_cli(cli: Cli) -> Result<(), String> {
             let project_id = match project {
                 Some(name) => match db.project_id_by_name(&name).map_err(|e| e.to_string())? {
                     Some(id) => Some(id),
-                    None => {
-                        return Err(format!(
-                            "No project named '{}' (create it first)",
-                            name
-                        ))
-                    }
+                    None => return Err(format!("No project named '{}' (create it first)", name)),
                 },
                 None => None,
             };
