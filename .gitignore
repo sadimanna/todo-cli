@@ -1,0 +1,27 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+
+# OS files
+.DS_Store
+
+# Logs
+*.log
+
+# Local env
+.env
+.env.*
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Misc
+.tmp/
+.cache/

@@ -1,0 +1,6 @@
+[Unit]
+Description=Todo reminder notifications
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/todo notify

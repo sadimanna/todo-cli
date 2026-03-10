@@ -1,0 +1,9 @@
+[Unit]
+Description=Run todo reminders every minute
+
+[Timer]
+OnUnitActiveSec=60s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
