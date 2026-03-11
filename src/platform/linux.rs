@@ -3,7 +3,9 @@ use std::error::Error;
 use std::process::Command;
 
 pub fn notify(title: &str, message: &str) -> Result<(), Box<dyn Error>> {
-    run_status(Command::new("notify-send").arg(title).arg(message))
+    let mut command = Command::new("notify-send");
+    command.arg(title).arg(message);
+    run_status(command)
 }
 
 pub fn play_sound() -> Result<(), Box<dyn Error>> {
@@ -15,7 +17,9 @@ pub fn play_sound() -> Result<(), Box<dyn Error>> {
     if sound_path.is_empty() {
         return Ok(());
     }
-    run_status(Command::new("paplay").arg(sound_path))
+    let mut command = Command::new("paplay");
+    command.arg(sound_path);
+    run_status(command)
 }
 
 fn run_status(mut command: Command) -> Result<(), Box<dyn Error>> {
